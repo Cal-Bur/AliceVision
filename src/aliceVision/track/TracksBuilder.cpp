@@ -71,6 +71,8 @@ void TracksBuilder::build(const PairwiseMatches& pairwiseMatches)
         }
     }
 
+    std::cout << "a:" << allFeatures.size() << std::endl;
+
     // build the node indirection for each referenced feature
     MapIndexToNode map_indexToNode;
     map_indexToNode.reserve(allFeatures.size());
@@ -83,6 +85,8 @@ void TracksBuilder::build(const PairwiseMatches& pairwiseMatches)
         _d->map_nodeToIndex.insert(std::make_pair(node, featPair));
     }
 
+    std::cout << "s:" << map_indexToNode.size() << std::endl;
+
     // add the element of myset to the UnionFind insert method.
     _d->index.reset(new IndexMap(_d->graph));
     _d->tracksUF.reset(new UnionFindObject(*_d->index));
@@ -91,6 +95,8 @@ void TracksBuilder::build(const PairwiseMatches& pairwiseMatches)
     {
         _d->tracksUF->insert(it);
     }
+
+    std::cout << "p:" << nbTracks() << std::endl;
 
     // make the union according the pair matches
     for (const auto& matchesPerDescIt : pairwiseMatches)
@@ -110,8 +116,12 @@ void TracksBuilder::build(const PairwiseMatches& pairwiseMatches)
                 IndexedFeaturePair pairJ(J, KeypointId(descType, m._j));
                 _d->tracksUF->join(map_indexToNode[pairI], map_indexToNode[pairJ]);
             }
+
+            std::cout << "e:" << nbTracks() << " " << matches.size() << std::endl;
         }
     }
+
+    
 }
 
 void TracksBuilder::filter(bool clearForks, std::size_t minTrackLength, bool multithreaded)
@@ -174,6 +184,8 @@ void TracksBuilder::exportToSTL(TracksMap& allTracks, const feature::FeaturesPer
     allTracks.clear();
 
     std::size_t trackIndex = 0;
+
+    
     for (lemon::UnionFindEnum<IndexMap>::ClassIt cit(*_d->tracksUF); cit != INVALID; ++cit, ++trackIndex)
     {
         // create the output track
@@ -181,13 +193,17 @@ void TracksBuilder::exportToSTL(TracksMap& allTracks, const feature::FeaturesPer
 
         Track& outTrack = ret.first->second;
 
+        int count = 0;
         for (lemon::UnionFindEnum<IndexMap>::ItemIt iit(*_d->tracksUF, cit); iit != INVALID; ++iit)
         {
             const IndexedFeaturePair& currentPair = _d->map_nodeToIndex.at(iit);
             // all descType inside the track will be the same
             outTrack.descType = currentPair.second.descType;
             outTrack.featPerView[currentPair.first].featureId = currentPair.second.featIndex;
+            count++;
         }
+
+        std::cout << count << std::endl;
     }
 
     //Fill additional data

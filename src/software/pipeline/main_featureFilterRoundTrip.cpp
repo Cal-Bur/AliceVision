@@ -35,6 +35,8 @@
 
 #include <boost/program_options.hpp>
 
+#include <aliceVision/track/TracksBuilder.hpp>
+
 // These constants define the current software version.
 // They must be updated when the command line is changed.
 #define ALICEVISION_SOFTWARE_VERSION_MAJOR 1
@@ -60,8 +62,6 @@ int aliceVision_main(int argc, char** argv)
     requiredParams.add_options()
         ("input,i", po::value<std::string>(&sfmDataFilename)->required(),
              "SfMData file.")
-        ("estimationFolder", po::value<std::string>(&estimationFolder)->required(),
-             "Estimation folder.")
         ("output,o", po::value<std::string>(&matchesFolderOutput)->required(),
             "Path to a folder in which computed matches will be stored.")
         ("imagesFolder", 
@@ -100,41 +100,46 @@ int aliceVision_main(int argc, char** argv)
         return EXIT_FAILURE;
     }
 
-    std::stringstream ss;
-    ss << estimationFolder << "/pairs_" << rangeStart << ".json";
-    std::ifstream inputfile(ss.str());
-    if (!inputfile.is_open())
+    //Create pairs
+    std::set<Pair> pairs;
+    auto keys = sfmData.getViewsKeys();
+    for (const auto & key : keys)
     {
-        ALICEVISION_LOG_INFO("No input file found for estimation");
-        return EXIT_SUCCESS;
+        for (const auto & other : keys)
+        {
+            if (key == other)
+            {
+                continue;
+            }
+
+            pairs.insert(std::make_pair(key, other));
+        }
     }
 
-    std::stringstream buffer;
-    buffer << inputfile.rdbuf();
-    boost::json::value jv = boost::json::parse(buffer.str());
-    std::vector<sfm::ConstraintPair> reconstructedPairs = boost::json::value_to<std::vector<sfm::ConstraintPair>>(jv);
 
-    for (const auto & reconstructedPair : reconstructedPairs)
+    for (const auto &pair: pairs)
     {
-        std::cout << reconstructedPair.reference << " " << reconstructedPair.next << std::endl;
+        const IndexT referenceId = pair.first;
+        const IndexT nextId = pair.second;
 
-        std::string path = imagesFolder + "/" + std::to_string(reconstructedPair.reference) + "_" + std::to_string(reconstructedPair.next)  + "_warp.exr";
+        std::string pathDirect = imagesFolder + "/" + std::to_string(referenceId) + "_" + std::to_string(nextId)  + "_warp.exr";
+        std::string pathIndirect = imagesFolder + "/" + std::to_string(nextId) + "_" + std::to_string(referenceId)  + "_warp.exr";
 
-        image::Image<image::RGBfColor> warp;
-        image::readImage(path, warp, image::EImageColorSpace::NO_CONVERSION);
-
-        double ratioX = 4032.0 / 864;
-        double ratioY = 3024.0 / 864;
-
-        robustEstimation::Mat3Model model(reconstructedPair.model);
-        multiview::relativePose::FundamentalSymmetricEpipolarDistanceError errorObject;
-
-        for (int i = 0; i < warp.height(); i++)
+        if (!(std::filesystem::exists(pathDirect) && std::filesystem::exists(pathIndirect)))
         {
-            for (int j = 0; j < warp.width(); j++)
+            continue;
+        }
+
+        image::Image<image::RGBfColor> warpDirect, warpIndirect;
+        image::readImage(pathDirect, warpDirect, image::EImageColorSpace::NO_CONVERSION);
+        image::readImage(pathIndirect, warpIndirect, image::EImageColorSpace::NO_CONVERSION);
+
+        for (int i = 0; i < warpDirect.height(); i++)
+        {
+            for (int j = 0; j < warpDirect.width(); j++)
             {
-                auto & pix = warp(i, j);
-                if (pix.b() < 1e-12)
+                auto & pix = warpDirect(i, j);
+                if (pix.b() < 0.1)
                 {
                     pix.r() = 0.0f;
                     pix.g() = 0.0f;
@@ -142,27 +147,64 @@ int aliceVision_main(int argc, char** argv)
                     continue;
                 }
 
-                Vec2 ref;
-                ref.x() = double(j) * ratioX;
-                ref.y() = double(i) * ratioY;
+                double x = pix.r() * 864.0;
+                double y = pix.g() * 864.0;
+                int oj = static_cast<int>(std::floor(x));
+                int oi = static_cast<int>(std::floor(y));
 
-                Vec2 next;
-                next.x() = pix.r() * 4032.0;
-                next.y() = pix.g() * 3024.0;
+                double minDist = 2;
+                int besti = 0;
+                int bestj = 0;
 
-
-                double err = errorObject.error(model, ref, next);
-                if (sqrt(err) > reconstructedPair.score)
+                for (int di = 0; di < 2; di++)
                 {
-                    pix.r() = 0.0f;
-                    pix.g() = 0.0f;
-                    pix.b() = 0.0f;
+                    for (int dj = 0; dj < 2; dj++)
+                    {
+                        int ci = oi + di;
+                        int cj = oj + dj;
+
+                        if (ci < 0 || cj < 0 || ci >= 864.0 || cj >= 864.0)
+                        {
+                            continue;
+                        }
+
+                        const auto & opix = warpIndirect(ci, cj);
+                        if (opix.b() < 0.1)
+                        {
+                            continue;
+                        }
+
+                        double refx = opix.r() * 864.0;
+                        double refy = opix.g() * 864.0;
+
+                        double diffx = refx - double(j);
+                        double diffy = refy - double(i);
+
+                        double dist = sqrt(diffx*diffx+diffy*diffy);
+                        
+                        if (dist < minDist)
+                        {
+                            minDist = dist;
+                            besti = ci;
+                            bestj = cj;
+                        }
+                    }
+                }
+
+                if (minDist > 1.0)
+                {
+                    pix.r() = 0.0;
+                    pix.g() = 0.0;
+                    pix.b() = 0.0;
                 }
             }
         }
 
-        std::string outpath = matchesFolderOutput + "/" + std::to_string(reconstructedPair.next) + "_" + std::to_string(reconstructedPair.reference)  + "_warp.exr";
-        image::writeImage(outpath, warp, image::ImageWriteOptions().toColorSpace(image::EImageColorSpace::NO_CONVERSION).storageDataType(image::EStorageDataType::Float));
+        
+
+
+        std::string outpath = matchesFolderOutput + "/" + std::to_string(referenceId) + "_" + std::to_string(nextId)  + "_warp.exr";
+        image::writeImage(outpath, warpDirect, image::ImageWriteOptions().toColorSpace(image::EImageColorSpace::NO_CONVERSION).storageDataType(image::EStorageDataType::Float));
     }
 
     return EXIT_SUCCESS;
