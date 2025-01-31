@@ -7,7 +7,6 @@
 
 #pragma once
 
-#include <aliceVision/config.hpp>
 #include <aliceVision/system/Logger.hpp>
 #include <aliceVision/image/Image.hpp>
 #include <aliceVision/image/Sampler.hpp>
@@ -23,27 +22,54 @@
 namespace aliceVision {
 namespace camera {
 
-/// Undistort an image according a given camera and its distortion model
+/**
+ * @Brief undistort an image when both intrinsic may be of different camera types
+ * @param imageIn the distorted image
+ * @param intrinsicSource the camera of the distorted image
+ * @param intrinsicOutput the camera of the undistorted image
+ * @param image_ud output image
+ * @param fillColor what is the default color when the pixel does not exists in the source image
+ * @param roi an optional roi for the output
+ */
 template<typename T>
-void UndistortImage(const image::Image<T>& imageIn,
-                    const camera::IntrinsicBase* intrinsicSource,
-                    const camera::IntrinsicBase* intrinsicOutput,
-                    const camera::Undistortion* undistortionOutput,
+void undistortImage(const image::Image<T>& imageIn,
+                    const camera::IntrinsicBase & intrinsicSource,
+                    const camera::IntrinsicBase & intrinsicOutput,
                     image::Image<T>& image_ud,
                     T fillcolor,
-                    const oiio::ROI& roi = oiio::ROI())
-{
-    if (!intrinsicSource->hasDistortion())  // no distortion, perform a direct copy
-    {
-        image_ud = imageIn;
-        return;
-    }
+                    const oiio::ROI& roi = oiio::ROI());
 
+/**
+ * @Brief undistort an image
+ * @param imageIn the distorted image
+ * @param intrinsicPtr the camera of the image
+ * @param image_ud output image
+ * @param fillColor what is the default color when the pixel does not exists in the source image
+ * @param correctPrincipalPoint do we want to correct the image to compensate the principal point shift
+ * @param roi an optional roi for the output
+ */
+template<typename T>
+void undistortImage(const image::Image<T>& imageIn,
+                    const camera::IntrinsicBase* intrinsicPtr,
+                    image::Image<T>& image_ud,
+                    T fillcolor,
+                    bool correctPrincipalPoint = false,
+                    const oiio::ROI& roi = oiio::ROI());
+
+
+template<typename T>
+void undistortImage(const image::Image<T>& imageIn,
+                    const camera::IntrinsicBase & intrinsicSource,
+                    const camera::IntrinsicBase & intrinsicOutput,
+                    image::Image<T>& image_ud,
+                    T fillcolor,
+                    const oiio::ROI& roi)
+{
     // There is distortion
     const Vec2 center(imageIn.width() * 0.5, imageIn.height() * 0.5);
 
-    int widthRoi = intrinsicOutput->w();
-    int heightRoi = intrinsicOutput->h();
+    int widthRoi = intrinsicOutput.w();
+    int heightRoi = intrinsicOutput.h();
     int xOffset = 0;
     int yOffset = 0;
     if (roi.defined())
@@ -65,8 +91,8 @@ void UndistortImage(const image::Image<T>& imageIn,
             const Vec2 undisto_pix(x + xOffset, y + yOffset);
 
             // compute coordinates with distortion
-            const Vec2 disto_pix = intrinsicSource->cam2ima(intrinsicSource->addDistortion(
-              intrinsicOutput->ima2cam((undistortionOutput) ? undistortionOutput->inverse(undisto_pix) : undisto_pix)));
+            const Vec3 intermediate = intrinsicOutput.backProjectUnit(undisto_pix);
+            const Vec2 disto_pix = intrinsicSource.project(intermediate.homogeneous(), true);
 
             // pick pixel if it is in the image domain
             if (imageIn.contains(disto_pix(1), disto_pix(0)))
@@ -77,14 +103,13 @@ void UndistortImage(const image::Image<T>& imageIn,
     }
 }
 
-/// Undistort an image according a given camera and its distortion model
 template<typename T>
-void UndistortImage(const image::Image<T>& imageIn,
+void undistortImage(const image::Image<T>& imageIn,
                     const camera::IntrinsicBase* intrinsicPtr,
                     image::Image<T>& image_ud,
                     T fillcolor,
-                    bool correctPrincipalPoint = false,
-                    const oiio::ROI& roi = oiio::ROI())
+                    bool correctPrincipalPoint,
+                    const oiio::ROI& roi)
 {
     if (!intrinsicPtr->hasDistortion())  // no distortion, perform a direct copy
     {

@@ -86,7 +86,7 @@ struct MaskCache
                         if (intrinsic->isValid() && intrinsic->hasDistortion())
                         {
                             image::Image<unsigned char> mask_ud;
-                            camera::UndistortImage(*mask, intrinsic.get(), mask_ud, (unsigned char)0);
+                            camera::undistortImage(*mask, intrinsic.get(), mask_ud, (unsigned char)0);
                             mask->swap(mask_ud);
                         }
                     }

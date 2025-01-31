@@ -122,7 +122,7 @@ bool exportToPMVSFormat(const SfMData& sfm_data,
             {
                 // undistort the image and save it
                 readImage(srcImage, image, image::EImageColorSpace::NO_CONVERSION);
-                UndistortImage(image, cam, image_ud, BLACK);
+                undistortImage(image, cam, image_ud, BLACK);
                 writeImage(dstImage, image_ud, image::ImageWriteOptions().toColorSpace(image::EImageColorSpace::NO_CONVERSION));
             }
             else  // (no distortion)

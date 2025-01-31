@@ -90,7 +90,7 @@ int aliceVision_main(int argc, char** argv)
 
         // compute undistorted image
         if (intrinsicPtr->isValid() && intrinsicPtr->hasDistortion())
-            camera::UndistortImage(image, intrinsicPtr.get(), imageUd, image::BLACK, true);
+            camera::undistortImage(image, intrinsicPtr.get(), imageUd, image::BLACK, true);
         else
             imageUd = image;
 

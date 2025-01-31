@@ -57,7 +57,7 @@ void exportImages(aliceVision::dataio::FeedProvider& feed,
 
         // drawChessboardCorners(view, boardSize, cv::Mat(pointbuf), found);
 
-        aliceVision::camera::UndistortImage(inputImage, &camera, outputImage, static_cast<unsigned char>(0));
+        aliceVision::camera::undistortImage(inputImage, &camera, outputImage, static_cast<unsigned char>(0));
         const std::filesystem::path imagePath = std::filesystem::path(debugFolder) / (std::to_string(currentFrame) + suffix);
         aliceVision::image::writeImage(imagePath.string(), outputImage, image::ImageWriteOptions());
     }

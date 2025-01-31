@@ -133,7 +133,7 @@ bool exportToMVE2Format(const SfMData& sfm_data,
             {
                 // Undistort and save the image
                 readImage(srcImage, image, image::EImageColorSpace::NO_CONVERSION);
-                UndistortImage(image, cam, image_ud, BLACK);
+                undistortImage(image, cam, image_ud, BLACK);
                 writeImage(dstImage, image_ud, image::ImageWriteOptions().toColorSpace(image::EImageColorSpace::NO_CONVERSION));
             }
             else  // (no distortion)

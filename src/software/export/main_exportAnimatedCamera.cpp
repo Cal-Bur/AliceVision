@@ -336,13 +336,13 @@ int aliceVision_main(int argc, char** argv)
 
                     ALICEVISION_LOG_DEBUG("rod:" + std::to_string(rod.xbegin) + ";" + std::to_string(rod.xend) + ";" + std::to_string(rod.ybegin) +
                                           ";" + std::to_string(rod.yend));
-                    camera::UndistortImage(image, cam, image_ud, image::FBLACK, correctPrincipalPoint, rod);
+                    camera::undistortImage(image, cam, image_ud, image::FBLACK, correctPrincipalPoint, rod);
                     const oiio::ROI roi = convertRodToRoi(cam, rod);
                     writeImage(dstImage, image_ud, image::ImageWriteOptions(), oiio::ParamValueList(), roi);
                 }
                 else
                 {
-                    camera::UndistortImage(image, cam, image_ud, image::FBLACK, correctPrincipalPoint);
+                    camera::undistortImage(image, cam, image_ud, image::FBLACK, correctPrincipalPoint);
                     image::writeImage(dstImage, image_ud, image::ImageWriteOptions(), metadata);
                 }
             }

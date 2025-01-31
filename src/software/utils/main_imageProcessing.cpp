@@ -610,7 +610,7 @@ void processImage(image::Image<image::RGBAfColor>& image,
 
             image_ud.resize(image.width(), image.height(), true, FBLACK_A);
 
-            camera::UndistortImage(image, cam.get(), image_ud, FBLACK_A);
+            camera::undistortImage(image, cam.get(), image_ud, FBLACK_A);
 
             image = image_ud;
         }

@@ -602,7 +602,7 @@ int aliceVision_main(int argc, char* argv[])
 
                     // Undistort
                     image::Image<image::RGBfColor> image_ud;
-                    camera::UndistortImage(image, intrinsicPtr.get(), image_ud, image::FBLACK, false);
+                    camera::undistortImage(image, intrinsicPtr.get(), image_ud, image::FBLACK, false);
 
                     // Save undistorted
                     std::stringstream ss;
