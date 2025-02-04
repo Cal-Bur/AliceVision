@@ -17,6 +17,7 @@
 
 #include <boost/program_options.hpp>
 
+#include <functional>
 #include <stdlib.h>
 #include <stdio.h>
 #include <cmath>
@@ -44,7 +45,8 @@ namespace fs = std::filesystem;
 
 template<class ImageT, class MaskFuncT>
 void process(const std::string& dstColorImage,
-             const IntrinsicBase* cam,
+             const camera::IntrinsicBase & outputIntrinsic,
+             const camera::IntrinsicBase & sourceIntrinsic,
              const oiio::ParamValueList& metadata,
              const std::string& srcImage,
              bool evCorrection,
@@ -67,23 +69,27 @@ void process(const std::string& dstColorImage,
 
     // mask
     maskFunc(image);
+    
+    // undistort the image and save it
+    using Pix = typename ImageT::Tpixel;
+    Pix pixZero(Pix::Zero());
+    undistortImage(image, sourceIntrinsic, outputIntrinsic, image_ud, pixZero);
 
-    // undistort
-    if (cam->isValid() && cam->hasDistortion())
-    {
-        // undistort the image and save it
-        using Pix = typename ImageT::Tpixel;
-        Pix pixZero(Pix::Zero());
-        UndistortImage(image, cam, image_ud, pixZero);
-        writeImage(dstColorImage, image_ud, image::ImageWriteOptions(), metadata);
-    }
-    else
-    {
-        writeImage(dstColorImage, image, image::ImageWriteOptions(), metadata);
-    }
+    //Write the result
+    writeImage(dstColorImage, image_ud, image::ImageWriteOptions(), metadata);
+}
+
+template<typename T/*, typename = std::enable_if_t<std::is_integral_v<T>>*/>
+std::string to_string_with_zero_padding(const T& value, std::size_t total_length)
+{
+    auto str = std::to_string(value);
+    if (str.length() < total_length)
+        str.insert(str.front() == '-' ? 1 : 0, total_length - str.length(), '0');
+    return str;
 }
 
 bool prepareDenseScene(const SfMData& sfmData,
+                       SfMData & outputSfmData,
                        const std::vector<std::string>& imagesFolders,
                        const std::vector<std::string>& masksFolders,
                        const std::string& maskExtension,
@@ -91,36 +97,19 @@ bool prepareDenseScene(const SfMData& sfmData,
                        int endIndex,
                        const std::string& outFolder,
                        image::EImageFileType outputFileType,
+                       double fakeFov,
                        bool saveMetadata,
                        bool saveMatricesFiles,
                        bool evCorrection)
 {
     // defined view Ids
-    std::set<IndexT> viewIds;
-
-    sfmData::Views::const_iterator itViewBegin = sfmData.getViews().begin();
-    sfmData::Views::const_iterator itViewEnd = sfmData.getViews().end();
-
-    if (endIndex > 0)
-    {
-        itViewEnd = itViewBegin;
-        std::advance(itViewEnd, endIndex);
-    }
-
-    std::advance(itViewBegin, (beginIndex < 0) ? 0 : beginIndex);
-
-    // export valid views as projective cameras
-    for (auto it = itViewBegin; it != itViewEnd; ++it)
-    {
-        const View* view = it->second.get();
-        if (!sfmData.isPoseAndIntrinsicDefined(view))
-            continue;
-        viewIds.insert(view->getViewId());
-    }
+    std::set<IndexT> viewIds = outputSfmData.getValidViews();
 
     if ((outputFileType != image::EImageFileType::EXR) && saveMetadata)
+    {
         ALICEVISION_LOG_WARNING("Cannot save informations in images metadata.\n"
                                 "Choose '.exr' file type if you want AliceVision custom metadata");
+    }
 
     // export data
     auto progressDisplay = system::createConsoleProgressDisplay(viewIds.size(), std::cout, "Exporting Scene Undistorted Images\n");
@@ -136,111 +125,103 @@ bool prepareDenseScene(const SfMData& sfmData,
         std::advance(itView, i);
 
         const IndexT viewId = *itView;
-        const View* view = sfmData.getViews().at(viewId).get();
+        const View & view = sfmData.getView(viewId);
 
-        Intrinsics::const_iterator iterIntrinsic = sfmData.getIntrinsics().find(view->getIntrinsicId());
+        const auto & originalIntrinsic = sfmData.getIntrinsic(view.getIntrinsicId());
+        const auto & intrinsic = outputSfmData.getIntrinsic(view.getIntrinsicId());
 
         // we have a valid view with a corresponding camera & pose
-        const std::string baseFilename = std::to_string(viewId);
+        const std::string baseFilename = to_string_with_zero_padding(view.getFrameId(), 5);
+        
 
-        // get metadata from source image to be sure we get all metadata. We don't use the metadatas from the Views inside the SfMData to avoid type
+        // get metadata from source image to be sure we get all metadata. 
+        // We don't use the metadatas from the Views inside the SfMData to avoid type
         // conversion problems with string maps.
-        std::string srcImage = view->getImage().getImagePath();
+        std::string srcImage = view.getImage().getImagePath();
         oiio::ParamValueList metadata = image::readImageMetadata(srcImage);
 
-        // export camera
-        if (saveMetadata || saveMatricesFiles)
+        // get camera pose / projection
+        const Pose3 pose = sfmData.getPose(view).getTransform();
+        const auto & camPinHole = dynamic_cast<const camera::Pinhole &>(intrinsic);
+
+        Mat34 P = camPinHole.getProjectiveEquivalent(pose);
+
+        // get camera intrinsics matrices
+        const Mat3 K = camPinHole.K();
+        const Mat3& R = pose.rotation();
+        const Vec3& t = pose.translation();
+
+        if (saveMatricesFiles)
         {
-            // get camera pose / projection
-            const Pose3 pose = sfmData.getPose(*view).getTransform();
+            std::ofstream fileP((fs::path(outFolder) / (baseFilename + "_P.txt")).string());
+            fileP << std::setprecision(10) << P(0, 0) << " " << P(0, 1) << " " << P(0, 2) << " " << P(0, 3) << "\n"
+                    << P(1, 0) << " " << P(1, 1) << " " << P(1, 2) << " " << P(1, 3) << "\n"
+                    << P(2, 0) << " " << P(2, 1) << " " << P(2, 2) << " " << P(2, 3) << "\n";
+            fileP.close();
 
-            std::shared_ptr<camera::IntrinsicBase> cam = iterIntrinsic->second;
-            std::shared_ptr<camera::Pinhole> camPinHole = std::dynamic_pointer_cast<camera::Pinhole>(cam);
-            if (!camPinHole)
-            {
-                ALICEVISION_LOG_ERROR("Camera is not pinhole in filter");
-                continue;
-            }
+            std::ofstream fileKRt((fs::path(outFolder) / (baseFilename + "_KRt.txt")).string());
+            fileKRt << std::setprecision(10) << K(0, 0) << " " << K(0, 1) << " " << K(0, 2) << "\n"
+                    << K(1, 0) << " " << K(1, 1) << " " << K(1, 2) << "\n"
+                    << K(2, 0) << " " << K(2, 1) << " " << K(2, 2) << "\n"
+                    << "\n"
+                    << R(0, 0) << " " << R(0, 1) << " " << R(0, 2) << "\n"
+                    << R(1, 0) << " " << R(1, 1) << " " << R(1, 2) << "\n"
+                    << R(2, 0) << " " << R(2, 1) << " " << R(2, 2) << "\n"
+                    << "\n"
+                    << t(0) << " " << t(1) << " " << t(2) << "\n";
+            fileKRt.close();
+        }
 
-            Mat34 P = camPinHole->getProjectiveEquivalent(pose);
+        if (saveMetadata)
+        {
+            // convert to 44 matix
+            Mat4 projectionMatrix;
+            projectionMatrix << P(0, 0), P(0, 1), P(0, 2), P(0, 3), P(1, 0), P(1, 1), P(1, 2), P(1, 3), P(2, 0), P(2, 1), P(2, 2), P(2, 3), 0, 0,
+                0, 1;
 
-            // get camera intrinsics matrices
-            const Mat3 K = dynamic_cast<const Pinhole*>(sfmData.getIntrinsicPtr(view->getIntrinsicId()))->K();
-            const Mat3& R = pose.rotation();
-            const Vec3& t = pose.translation();
+            // convert matrices to rowMajor
+            std::vector<double> vP(projectionMatrix.size());
+            std::vector<double> vK(K.size());
+            std::vector<double> vR(R.size());
 
-            if (saveMatricesFiles)
-            {
-                std::ofstream fileP((fs::path(outFolder) / (baseFilename + "_P.txt")).string());
-                fileP << std::setprecision(10) << P(0, 0) << " " << P(0, 1) << " " << P(0, 2) << " " << P(0, 3) << "\n"
-                      << P(1, 0) << " " << P(1, 1) << " " << P(1, 2) << " " << P(1, 3) << "\n"
-                      << P(2, 0) << " " << P(2, 1) << " " << P(2, 2) << " " << P(2, 3) << "\n";
-                fileP.close();
+            typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> RowMatrixXd;
+            Eigen::Map<RowMatrixXd>(vP.data(), projectionMatrix.rows(), projectionMatrix.cols()) = projectionMatrix;
+            Eigen::Map<RowMatrixXd>(vK.data(), K.rows(), K.cols()) = K;
+            Eigen::Map<RowMatrixXd>(vR.data(), R.rows(), R.cols()) = R;
 
-                std::ofstream fileKRt((fs::path(outFolder) / (baseFilename + "_KRt.txt")).string());
-                fileKRt << std::setprecision(10) << K(0, 0) << " " << K(0, 1) << " " << K(0, 2) << "\n"
-                        << K(1, 0) << " " << K(1, 1) << " " << K(1, 2) << "\n"
-                        << K(2, 0) << " " << K(2, 1) << " " << K(2, 2) << "\n"
-                        << "\n"
-                        << R(0, 0) << " " << R(0, 1) << " " << R(0, 2) << "\n"
-                        << R(1, 0) << " " << R(1, 1) << " " << R(1, 2) << "\n"
-                        << R(2, 0) << " " << R(2, 1) << " " << R(2, 2) << "\n"
-                        << "\n"
-                        << t(0) << " " << t(1) << " " << t(2) << "\n";
-                fileKRt.close();
-            }
-
-            if (saveMetadata)
-            {
-                // convert to 44 matix
-                Mat4 projectionMatrix;
-                projectionMatrix << P(0, 0), P(0, 1), P(0, 2), P(0, 3), P(1, 0), P(1, 1), P(1, 2), P(1, 3), P(2, 0), P(2, 1), P(2, 2), P(2, 3), 0, 0,
-                  0, 1;
-
-                // convert matrices to rowMajor
-                std::vector<double> vP(projectionMatrix.size());
-                std::vector<double> vK(K.size());
-                std::vector<double> vR(R.size());
-
-                typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> RowMatrixXd;
-                Eigen::Map<RowMatrixXd>(vP.data(), projectionMatrix.rows(), projectionMatrix.cols()) = projectionMatrix;
-                Eigen::Map<RowMatrixXd>(vK.data(), K.rows(), K.cols()) = K;
-                Eigen::Map<RowMatrixXd>(vR.data(), R.rows(), R.cols()) = R;
-
-                // add metadata
-                metadata.push_back(oiio::ParamValue("AliceVision:downscale", 1));
-                metadata.push_back(oiio::ParamValue("AliceVision:P", oiio::TypeDesc(oiio::TypeDesc::DOUBLE, oiio::TypeDesc::MATRIX44), 1, vP.data()));
-                metadata.push_back(oiio::ParamValue("AliceVision:K", oiio::TypeDesc(oiio::TypeDesc::DOUBLE, oiio::TypeDesc::MATRIX33), 1, vK.data()));
-                metadata.push_back(oiio::ParamValue("AliceVision:R", oiio::TypeDesc(oiio::TypeDesc::DOUBLE, oiio::TypeDesc::MATRIX33), 1, vR.data()));
-                metadata.push_back(oiio::ParamValue("AliceVision:t", oiio::TypeDesc(oiio::TypeDesc::DOUBLE, oiio::TypeDesc::VEC3), 1, t.data()));
-            }
+            // add metadata
+            metadata.push_back(oiio::ParamValue("AliceVision:downscale", 1));
+            metadata.push_back(oiio::ParamValue("AliceVision:P", oiio::TypeDesc(oiio::TypeDesc::DOUBLE, oiio::TypeDesc::MATRIX44), 1, vP.data()));
+            metadata.push_back(oiio::ParamValue("AliceVision:K", oiio::TypeDesc(oiio::TypeDesc::DOUBLE, oiio::TypeDesc::MATRIX33), 1, vK.data()));
+            metadata.push_back(oiio::ParamValue("AliceVision:R", oiio::TypeDesc(oiio::TypeDesc::DOUBLE, oiio::TypeDesc::MATRIX33), 1, vR.data()));
+            metadata.push_back(oiio::ParamValue("AliceVision:t", oiio::TypeDesc(oiio::TypeDesc::DOUBLE, oiio::TypeDesc::VEC3), 1, t.data()));
         }
 
         // export undistort image
         {
             if (!imagesFolders.empty())
             {
-                std::vector<std::string> paths = sfmDataIO::viewPathsFromFolders(*view, imagesFolders);
+                std::vector<std::string> paths = sfmDataIO::viewPathsFromFolders(view, imagesFolders);
 
                 // if path was not found
                 if (paths.empty())
                 {
-                    throw std::runtime_error("Cannot find view '" + std::to_string(view->getViewId()) + "' image file in given folder(s)");
+                    throw std::runtime_error("Cannot find view '" + std::to_string(view.getViewId()) + "' image file in given folder(s)");
                 }
                 else if (paths.size() > 1)
                 {
                     throw std::runtime_error("Ambiguous case: Multiple source image files found in given folder(s) for the view '" +
-                                             std::to_string(view->getViewId()) + "'.");
+                                             std::to_string(view.getViewId()) + "'.");
                 }
 
                 srcImage = paths[0];
             }
+
             const std::string dstColorImage =
               (fs::path(outFolder) / (baseFilename + "." + image::EImageFileType_enumToString(outputFileType))).string();
-            const IntrinsicBase* cam = iterIntrinsic->second.get();
 
             // add exposure values to images metadata
-            const double cameraExposure = view->getImage().getCameraExposureSetting().getExposure();
+            const double cameraExposure = view.getImage().getCameraExposureSetting().getExposure();
             const double ev = std::log2(1.0 / cameraExposure);
             const float exposureCompensation = float(medianCameraExposure / cameraExposure);
             metadata.push_back(oiio::ParamValue("AliceVision:EV", float(ev)));
@@ -253,31 +234,144 @@ bool prepareDenseScene(const SfMData& sfmData,
             }
 
             image::Image<unsigned char> mask;
+
+            std::function<void(Image<RGBAfColor>&)> function = [](Image<RGBAfColor>& image) {};
+            
+            
             if (tryLoadMask(&mask, masksFolders, viewId, srcImage, maskExtension))
             {
-                process<Image<RGBAfColor>>(
-                  dstColorImage, cam, metadata, srcImage, evCorrection, exposureCompensation, [&mask](Image<RGBAfColor>& image) {
-                      if (image.width() * image.height() != mask.width() * mask.height())
-                      {
-                          ALICEVISION_LOG_WARNING("Invalid image mask size: mask is ignored.");
-                          return;
-                      }
+                function = [&mask](Image<RGBAfColor>& image) {
+                                if (image.width() * image.height() != mask.width() * mask.height())
+                                {
+                                    ALICEVISION_LOG_WARNING("Invalid image mask size: mask is ignored.");
+                                    return;
+                                }
 
-                      for (int pix = 0; pix < image.width() * image.height(); ++pix)
-                      {
-                          const bool masked = (mask(pix) == 0);
-                          image(pix).a() = masked ? 0.f : 1.f;
-                      }
-                  });
+                                for (int pix = 0; pix < image.width() * image.height(); ++pix)
+                                {
+                                    const bool masked = (mask(pix) == 0);
+                                    image(pix).a() = masked ? 0.f : 1.f;
+                                }
+                            };
             }
-            else
-            {
-                const auto noMaskingFunc = [](Image<RGBAfColor>& image) {};
-                process<Image<RGBAfColor>>(dstColorImage, cam, metadata, srcImage, evCorrection, exposureCompensation, noMaskingFunc);
-            }
+
+            process<Image<RGBAfColor>>(dstColorImage, intrinsic, originalIntrinsic, metadata, srcImage, evCorrection, exposureCompensation, function);
         }
 
         ++progressDisplay;
+    }
+
+    return true;
+}
+
+/**
+ * @brief create a new SfmData where all the non pinhole stuff are removed
+ * For example, distortion/undistortion are removed, and the images are undistorted
+ * @param sfmData the original sfmData
+ * @param outputSfmData the result sfmData
+ * @param fakeFov if one intrinsic is non pinhole, what is the required fov for the "fake" camera
+ * @param baseImagePath the path to the stored images
+ * @param fileType the output images file type
+ * @return true if everything worked
+*/
+bool convertSfmData(const sfmData::SfMData & sfmData, sfmData::SfMData & outputSfmData, double fakeFov, const std::string & baseImagePath, const EImageFileType & fileType)
+{
+    outputSfmData = sfmData::SfMData(sfmData);
+
+    outputSfmData.getIntrinsics().clear();
+
+    // Loop over all input intrinsics
+    for (const auto & [intrinsicId, intrinsicPtr] : sfmData.getIntrinsics())
+    {
+        const auto & originalIntrinsic = *intrinsicPtr;
+        bool isPinhole = camera::isPinhole(originalIntrinsic.getType());
+
+        //BY default, create a fake camera with a given fov
+        double hw = double(originalIntrinsic.w()) * 0.5;
+        double fx = hw / std::tan(fakeFov * 0.5);
+        double fy = fx;
+        double cx = 0.0;
+        double cy = 0.0;
+
+        if (isPinhole)
+        {
+            //IF pinhone, recreate without distortion
+            const auto & pinhole = dynamic_cast<const camera::Pinhole &>(originalIntrinsic);
+            fx = pinhole.getScale().x();
+            fy = pinhole.getScale().y();
+            cx = pinhole.getOffset().x();
+            cy = pinhole.getOffset().y();
+        }
+
+
+        std::shared_ptr<camera::IntrinsicBase> fakecam = camera::createPinhole(camera::DISTORTION_NONE, 
+                                                camera::UNDISTORTION_NONE, 
+                                                originalIntrinsic.w(), originalIntrinsic.h(),
+                                                fx, fy, cx, cy
+                                                );
+
+        outputSfmData.getIntrinsics().insert({intrinsicId, fakecam});
+    }
+
+    outputSfmData.getViews().clear();
+    for (auto & [idView, pView] : sfmData.getViews())
+    {
+        if (!sfmData.isPoseAndIntrinsicDefined(*pView))
+        {
+            continue;
+        }
+
+        const std::string extName = image::EImageFileType_enumToString(fileType);
+        const std::string baseFilename = to_string_with_zero_padding(pView->getFrameId(), 5);
+        const std::string path = (fs::path(baseImagePath) / (baseFilename + "." + extName)).string();
+
+        sfmData::View::sptr pOutView(pView->clone());
+        pOutView->getImage().setImagePath(path);
+        outputSfmData.getViews().insert({idView, pOutView});
+    }
+
+    for (auto & [idLandmark, landmark] : outputSfmData.getLandmarks())
+    {
+        //Copy observations and erase
+        const auto observationsCopy = landmark.getObservations();
+        landmark.getObservations().clear();
+
+        for (const auto & [idView, obs] : observationsCopy)
+        {
+            //Ignore non reconstructed views
+            const auto & view = sfmData.getView(idView);
+            if (!sfmData.isPoseAndIntrinsicDefined(view))
+            {
+                continue;
+            }
+
+            //Undistort observation
+            IndexT intrinsicId = view.getIntrinsicId();
+            const auto & inputIntrinsic = sfmData.getIntrinsic(intrinsicId);
+            const auto & outputIntrinsic = outputSfmData.getIntrinsic(intrinsicId);
+
+            const Vec3 intermediate = inputIntrinsic.backProjectUnit(obs.getCoordinates());
+            if (intermediate.z() < 1e-2)
+            {
+                continue;
+            }
+
+            const Vec2 undistorted = outputIntrinsic.project(intermediate.homogeneous(), true);
+            if (undistorted.x() < 0 || undistorted.y() < 0)
+            {
+                continue;
+            }
+
+            if (undistorted.x() >= outputIntrinsic.w() || undistorted.y() >= outputIntrinsic.h())
+            {
+                continue;
+            }
+
+            sfmData::Observation outputObservation = obs;
+            outputObservation.setCoordinates(undistorted);
+
+            landmark.getObservations()[idView] = outputObservation;
+        }
     }
 
     return true;
@@ -289,6 +383,7 @@ int aliceVision_main(int argc, char* argv[])
 
     std::string verboseLevel = system::EVerboseLevel_enumToString(system::Logger::getDefaultVerboseLevel());
     std::string sfmDataFilename;
+    std::string sfmDataOutputFilename;
     std::string outFolder;
     std::string outImageFileTypeName = image::EImageFileType_enumToString(image::EImageFileType::EXR);
     std::vector<std::string> imagesFolders;
@@ -299,12 +394,15 @@ int aliceVision_main(int argc, char* argv[])
     bool saveMetadata = true;
     bool saveMatricesTxtFiles = false;
     bool evCorrection = false;
+    double fakeFov = 90.0;
 
     // clang-format off
     po::options_description requiredParams("Required parameters");
     requiredParams.add_options()
         ("input,i", po::value<std::string>(&sfmDataFilename)->required(),
          "SfMData file.")
+        ("outputSfmData,s", po::value<std::string>(&sfmDataOutputFilename)->required(),
+         "SfMData Output File.")
         ("output,o", po::value<std::string>(&outFolder)->required(),
          "Output folder.");
 
@@ -329,7 +427,8 @@ int aliceVision_main(int argc, char* argv[])
         ("rangeSize", po::value<int>(&rangeSize)->default_value(rangeSize),
          "Range size.")
         ("evCorrection", po::value<bool>(&evCorrection)->default_value(evCorrection),
-         "Correct exposure value.");
+         "Correct exposure value.")
+        ("fakeFov", po::value<double>(&fakeFov)->default_value(fakeFov), "Virtual field of view to use if the camera is not pinhole");
     // clang-format on
 
     CmdLine cmdline("AliceVision prepareDenseScene");
@@ -345,7 +444,9 @@ int aliceVision_main(int argc, char* argv[])
 
     // Create output dir
     if (!utils::exists(outFolder))
+    {
         fs::create_directory(outFolder);
+    }
 
     // Read the input SfM scene
     SfMData sfmData;
@@ -355,7 +456,17 @@ int aliceVision_main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    int rangeEnd = sfmData.getViews().size();
+    const double fakeFovRadians = degreeToRadian(fakeFov);
+    SfMData outputSfmData;
+    if (!convertSfmData(sfmData, outputSfmData, fakeFovRadians, outFolder, outputFileType))
+    {
+        ALICEVISION_LOG_ERROR("Can't create output sfmData");
+        return EXIT_FAILURE;
+    }
+
+
+    //Use transformed sfmData
+    int rangeEnd = outputSfmData.getViews().size();
 
     // set range
     if (rangeStart != -1)
@@ -366,8 +477,10 @@ int aliceVision_main(int argc, char* argv[])
             return EXIT_FAILURE;
         }
 
-        if (rangeStart + rangeSize > sfmData.getViews().size())
-            rangeSize = sfmData.getViews().size() - rangeStart;
+        if (rangeStart + rangeSize > outputSfmData.getViews().size())
+        {
+            rangeSize = outputSfmData.getViews().size() - rangeStart;
+        }
 
         rangeEnd = rangeStart + rangeSize;
 
@@ -382,8 +495,10 @@ int aliceVision_main(int argc, char* argv[])
         rangeStart = 0;
     }
 
+
     // export
-    if (prepareDenseScene(sfmData,
+    if (!prepareDenseScene(sfmData,
+                          outputSfmData,
                           imagesFolders,
                           masksFolders,
                           maskExtension,
@@ -391,10 +506,26 @@ int aliceVision_main(int argc, char* argv[])
                           rangeEnd,
                           outFolder,
                           outputFileType,
+                          fakeFovRadians,
                           saveMetadata,
                           saveMatricesTxtFiles,
                           evCorrection))
-        return EXIT_SUCCESS;
+    {
+        return EXIT_FAILURE;
+    }
 
-    return EXIT_FAILURE;
+
+    //Only write the sfmData for the first chunk
+    if (rangeStart == 0)
+    {
+        if (!sfmDataIO::save(outputSfmData, sfmDataOutputFilename, sfmDataIO::ESfMData::ALL))
+        {
+            ALICEVISION_LOG_ERROR("Error writing sfmData");
+            return EXIT_FAILURE;
+        }
+    }
+
+    
+
+    return EXIT_SUCCESS;
 }
