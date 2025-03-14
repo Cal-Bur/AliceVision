@@ -1,3 +1,7 @@
+# [aliceVision] Apply clang-format to several modules
+5cf0c8063a22cc036b9e57929293bd1bcebf72a7
+# [sfmDataIO] CMakeLists: Use 4-space indentation instead of 2-space
+e37ab23dcc0923486f356d8eae02277a00029783
 # [aliceVision] Reformat src/aliceVision with latest clang-format rules
 0fb0a02b75142bcf3b23009428028e2198917275
 # [software] Reformat src/software with latest clang-format rules
