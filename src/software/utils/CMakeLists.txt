@@ -135,6 +135,19 @@ if(ALICEVISION_BUILD_SFM)
 
     # Transform rig
     if(ALICEVISION_HAVE_ALEMBIC)
+
+        alicevision_add_software(aliceVision_importAlembic
+            SOURCE main_importAlembic.cpp
+            FOLDER ${FOLDER_SOFTWARE_UTILS}
+            LINKS aliceVision_sfmData
+                  aliceVision_sfmDataIO
+                  aliceVision_system
+                  aliceVision_cmdline
+                  aliceVision_image
+                  Boost::program_options
+                  Alembic::Alembic
+        )
+
         alicevision_add_software(aliceVision_rigTransform
             SOURCE main_rigTransform.cpp
             FOLDER ${FOLDER_SOFTWARE_UTILS}
